@@ -416,6 +416,14 @@ impl FormatBuilder {
             "path" => Part::Path,
             "line" => Part::Line,
             "column" => Part::Column,
+            _ if name.starts_with("meta:") => {
+                let key = &name[5..]; // Skip "meta:" prefix
+                Part::MetaField(key.to_string())
+            }
+            _ if name.starts_with("meta.") => {
+                let key = &name[5..]; // Skip "meta." prefix
+                Part::MetaField(key.to_string())
+            }
             unknown => {
                 let err = HyperlinkFormatError {
                     kind: HyperlinkFormatErrorKind::InvalidVariable(
@@ -527,6 +535,10 @@ enum Part {
     Line,
     /// Variable for the column number.
     Column,
+    /// Variable for a metadata field.
+    ///
+    /// The string contains the key name to look up in the metadata.
+    MetaField(String),
 }
 
 impl Part {
@@ -555,6 +567,16 @@ impl Part {
                 let column = DecimalFormatter::new(values.column.unwrap_or(1));
                 dest.extend_from_slice(column.as_bytes());
             }
+            Part::MetaField(ref key) => {
+                if let Some(metadata) = values.metadata {
+                    if let Some(value) = metadata.get(key) {
+                        let value_str = value.to_string();
+                        dest.extend_from_slice(value_str.as_bytes());
+                    }
+                    // If key not found, write nothing (graceful degradation)
+                }
+                // If no metadata provided, write nothing
+            }
         }
     }
 }
@@ -568,6 +590,7 @@ impl std::fmt::Display for Part {
             Part::Path => write!(f, "{{path}}"),
             Part::Line => write!(f, "{{line}}"),
             Part::Column => write!(f, "{{column}}"),
+            Part::MetaField(key) => write!(f, "{{meta:{}}}", key),
         }
     }
 }
@@ -582,6 +605,7 @@ pub(crate) struct Values<'a> {
     path: &'a HyperlinkPath,
     line: Option<u64>,
     column: Option<u64>,
+    metadata: Option<&'a grep_metadata::MatchMetadata>,
 }
 
 impl<'a> Values<'a> {
@@ -590,7 +614,7 @@ impl<'a> Values<'a> {
     /// Callers may also set the line and column number using the mutator
     /// methods.
     pub(crate) fn new(path: &'a HyperlinkPath) -> Values<'a> {
-        Values { path, line: None, column: None }
+        Values { path, line: None, column: None, metadata: None }
     }
 
     /// Sets the line number for these values.
@@ -609,6 +633,18 @@ impl<'a> Values<'a> {
     /// automatically.
     pub(crate) fn column(mut self, column: Option<u64>) -> Values<'a> {
         self.column = column;
+        self
+    }
+
+    /// Sets the metadata for these values.
+    ///
+    /// If metadata is not set and a hyperlink format contains a `{meta:key}`
+    /// variable, it will be interpolated as an empty string.
+    pub(crate) fn metadata(
+        mut self,
+        metadata: Option<&'a grep_metadata::MatchMetadata>,
+    ) -> Values<'a> {
+        self.metadata = metadata;
         self
     }
 }
@@ -1161,5 +1197,119 @@ mod tests {
                 "invalid hyperlink alias '{name}': {format}",
             );
         }
+    }
+
+    #[test]
+    fn parse_metadata_colon_syntax() {
+        let format = HyperlinkFormat::from_str("vscode://file{path}:{line}#{meta:page}")
+            .unwrap();
+
+        assert_eq!(format.to_string(), "vscode://file{path}:{line}#{meta:page}");
+        assert!(format.parts.iter().any(|p| matches!(p, Part::MetaField(key) if key == "page")));
+    }
+
+    #[test]
+    fn parse_metadata_dot_syntax() {
+        let format = HyperlinkFormat::from_str("vscode://file{path}:{line}#{meta.chapter}")
+            .unwrap();
+
+        assert_eq!(format.to_string(), "vscode://file{path}:{line}#{meta:chapter}");
+        assert!(format.parts.iter().any(|p| matches!(p, Part::MetaField(key) if key == "chapter")));
+    }
+
+    #[test]
+    fn parse_multiple_metadata_fields() {
+        let format = HyperlinkFormat::from_str(
+            "foo://{path}#{meta:page},{meta:line},{meta.subtitle}"
+        ).unwrap();
+
+        let meta_fields: Vec<&String> = format.parts.iter()
+            .filter_map(|p| if let Part::MetaField(key) = p { Some(key) } else { None })
+            .collect();
+
+        assert_eq!(meta_fields.len(), 3);
+        assert!(meta_fields.contains(&&"page".to_string()));
+        assert!(meta_fields.contains(&&"line".to_string()));
+        assert!(meta_fields.contains(&&"subtitle".to_string()));
+    }
+
+    #[test]
+    fn interpolate_metadata_present() {
+        use grep_metadata::{MatchMetadata, MetaValue};
+        use std::path::Path;
+
+        let mut metadata = MatchMetadata::new();
+        metadata.insert("page", MetaValue::Int(42));
+        metadata.insert("chapter", MetaValue::Str("Introduction".into()));
+
+        let format = HyperlinkFormat::from_str(
+            "file://{path}#page={meta:page}&chapter={meta:chapter}"
+        ).unwrap();
+
+        let env = HyperlinkEnvironment::default();
+        let path = HyperlinkPath::encode(b"/tmp/test.txt");
+        let values = Values::new(&path).metadata(Some(&metadata));
+
+        // Manually interpolate
+        let mut url = Vec::new();
+        for part in &format.parts {
+            part.interpolate_to(&env, &values, &mut url);
+        }
+        let url_str = String::from_utf8(url).unwrap();
+
+        assert!(url_str.contains("page=42"), "URL: {}", url_str);
+        assert!(url_str.contains("chapter=Introduction"), "URL: {}", url_str);
+    }
+
+    #[test]
+    fn interpolate_metadata_missing_key() {
+        use grep_metadata::{MatchMetadata, MetaValue};
+        use std::path::Path;
+
+        let mut metadata = MatchMetadata::new();
+        metadata.insert("page", MetaValue::Int(17));
+        // Note: "chapter" key is NOT present
+
+        let format = HyperlinkFormat::from_str(
+            "file://{path}#page={meta:page}&chapter={meta:chapter}"
+        ).unwrap();
+
+        let env = HyperlinkEnvironment::default();
+        let path = HyperlinkPath::encode(b"/tmp/test.txt");
+        let values = Values::new(&path).metadata(Some(&metadata));
+
+        // Manually interpolate
+        let mut url = Vec::new();
+        for part in &format.parts {
+            part.interpolate_to(&env, &values, &mut url);
+        }
+        let url_str = String::from_utf8(url).unwrap();
+
+        // page should be present, chapter should be empty string
+        assert!(url_str.contains("page=17"), "URL: {}", url_str);
+        assert!(url_str.contains("&chapter="), "URL: {}", url_str);
+        assert!(!url_str.contains("&chapter=Introduction"), "URL: {}", url_str);
+    }
+
+    #[test]
+    fn interpolate_no_metadata_provider() {
+        let format = HyperlinkFormat::from_str(
+            "file://{path}#page={meta:page}"
+        ).unwrap();
+
+        let env = HyperlinkEnvironment::default();
+        let path = HyperlinkPath::encode(b"/tmp/test.txt");
+        let values = Values::new(&path).metadata(None);
+
+        // Manually interpolate
+        let mut url = Vec::new();
+        for part in &format.parts {
+            part.interpolate_to(&env, &values, &mut url);
+        }
+        let url_str = String::from_utf8(url).unwrap();
+
+        // Without metadata, meta fields should be empty
+        assert!(url_str.contains("page="), "URL: {}", url_str);
+        assert!(!url_str.contains("page=42"), "URL: {}", url_str);
     }
 }

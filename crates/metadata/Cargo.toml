@@ -1,0 +1,17 @@
+[package]
+name = "grep-metadata"
+version = "0.1.0"
+authors = ["ripgrep developers"]
+edition = "2021"
+rust-version = "1.70"
+license = "MIT OR Unlicense"
+repository = "https://github.com/BurntSushi/ripgrep"
+description = """
+Provides structured metadata support for search matches, enabling adapters
+(PDF, ZIP, MKV, DOCX, etc.) to associate arbitrary key-value metadata with
+byte ranges in searched content.
+"""
+
+[dependencies]
+
+[dev-dependencies]

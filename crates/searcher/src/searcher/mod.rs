@@ -17,6 +17,7 @@ use crate::{
         LineBufferBuilder, LineBufferReader, alloc_error,
     },
     searcher::glue::{MultiLine, ReadByLine, SliceByLine},
+    searcher::meta::{MultiLineWithMeta, SliceByLineWithMeta},
     sink::{Sink, SinkError},
 };
 
@@ -24,6 +25,7 @@ pub use self::mmap::MmapChoice;
 
 mod core;
 mod glue;
+mod meta;
 mod mmap;
 
 /// We use this type alias since we want the ergonomics of a matcher's `Match`
@@ -791,6 +793,52 @@ impl Searcher {
         } else {
             log::trace!("slice reader: searching via slice-by-line strategy");
             SliceByLine::new(self, matcher, slice, write_to).run()
+        }
+    }
+
+    /// Execute a search over the given slice with metadata support and write
+    /// the results to the given sink.
+    ///
+    /// This is similar to `search_slice`, but accepts an optional metadata
+    /// provider that supplies structured metadata for byte ranges in the slice.
+    /// Matches and context lines will automatically receive metadata based on
+    /// their absolute byte offsets.
+    ///
+    /// The metadata provider maps byte offsets to structured data (e.g., page
+    /// numbers, chapter names, subtitle timestamps, table names, etc.). This
+    /// metadata can then be used in output formatting, such as in hyperlink
+    /// templates.
+    ///
+    /// If `provider` is `None`, this behaves identically to `search_slice`.
+    pub fn search_slice_with_metadata<M, S>(
+        &mut self,
+        matcher: M,
+        slice: &[u8],
+        provider: Option<&dyn grep_metadata::MetadataProvider>,
+        write_to: S,
+    ) -> Result<(), S::Error>
+    where
+        M: Matcher,
+        S: crate::sink::SinkWithMeta,
+        S::Error: From<<M as Matcher>::Error>,
+    {
+        self.check_config(&matcher).map_err(S::Error::error_config)?;
+
+        // We can search the slice directly, unless we need to do transcoding.
+        if self.slice_needs_transcoding(slice) {
+            log::trace!(
+                "slice reader (with metadata): needs transcoding, using generic reader"
+            );
+            // Note: metadata support for transcoded readers not yet implemented
+            // For now, fall back to regular search
+            return self.search_reader(matcher, slice, write_to);
+        }
+        if self.multi_line_with_matcher(&matcher) {
+            log::trace!("slice reader (with metadata): searching via multiline strategy");
+            MultiLineWithMeta::new(self, matcher, slice, provider, write_to).run()
+        } else {
+            log::trace!("slice reader (with metadata): searching via slice-by-line strategy");
+            SliceByLineWithMeta::new(self, matcher, slice, provider, write_to).run()
         }
     }
 

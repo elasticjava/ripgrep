@@ -661,3 +661,91 @@ pub mod sinks {
         }
     }
 }
+
+// ============================================================================
+// Metadata-aware Sink Extensions
+// ============================================================================
+
+/// A match with optional associated metadata.
+///
+/// This struct wraps a regular `SinkMatch` and adds an optional reference
+/// to metadata that describes properties of the location where the match
+/// occurred (e.g., page number, chapter, subtitle timestamp, etc.).
+#[derive(Clone, Debug)]
+pub struct SinkMatchWithMeta<'b, 'm> {
+    /// The base match information
+    pub base: SinkMatch<'b>,
+    /// Optional metadata for this match
+    pub metadata: Option<&'m grep_metadata::MatchMetadata>,
+}
+
+/// A context line with optional associated metadata.
+///
+/// This struct wraps a regular `SinkContext` and adds an optional reference
+/// to metadata describing the context line's location.
+#[derive(Clone, Debug)]
+pub struct SinkContextWithMeta<'b, 'm> {
+    /// The base context information
+    pub base: SinkContext<'b>,
+    /// Optional metadata for this context line
+    pub metadata: Option<&'m grep_metadata::MatchMetadata>,
+}
+
+/// An extension of the `Sink` trait that provides metadata-aware methods.
+///
+/// This trait extends `Sink` with methods that receive matches and context
+/// lines along with optional metadata. The metadata describes properties
+/// of the location where the match or context line occurred.
+///
+/// Implementations can choose to handle metadata or ignore it by using
+/// the default implementations, which forward to the non-metadata methods.
+pub trait SinkWithMeta: Sink {
+    /// Called for each match found, with optional metadata.
+    ///
+    /// By default, this forwards to `matched()`, ignoring the metadata.
+    /// Implementations that want to use metadata should override this method.
+    #[inline]
+    fn matched_with_meta(
+        &mut self,
+        searcher: &Searcher,
+        mat: &SinkMatchWithMeta<'_, '_>,
+    ) -> Result<bool, Self::Error> {
+        self.matched(searcher, &mat.base)
+    }
+
+    /// Called for each context line found, with optional metadata.
+    ///
+    /// By default, this forwards to `context()`, ignoring the metadata.
+    /// Implementations that want to use metadata should override this method.
+    #[inline]
+    fn context_with_meta(
+        &mut self,
+        searcher: &Searcher,
+        ctx: &SinkContextWithMeta<'_, '_>,
+    ) -> Result<bool, Self::Error> {
+        self.context(searcher, &ctx.base)
+    }
+}
+
+/// Blanket implementation for mutable references.
+///
+/// This allows passing `&mut sink` to methods that require `SinkWithMeta`.
+impl<S: SinkWithMeta> SinkWithMeta for &mut S {
+    #[inline]
+    fn matched_with_meta(
+        &mut self,
+        searcher: &Searcher,
+        mat: &SinkMatchWithMeta<'_, '_>,
+    ) -> Result<bool, Self::Error> {
+        (**self).matched_with_meta(searcher, mat)
+    }
+
+    #[inline]
+    fn context_with_meta(
+        &mut self,
+        searcher: &Searcher,
+        ctx: &SinkContextWithMeta<'_, '_>,
+    ) -> Result<bool, Self::Error> {
+        (**self).context_with_meta(searcher, ctx)
+    }
+}

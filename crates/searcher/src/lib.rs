@@ -91,6 +91,7 @@ pub use crate::{
     },
     sink::{
         Sink, SinkContext, SinkContextKind, SinkError, SinkFinish, SinkMatch,
+        SinkContextWithMeta, SinkMatchWithMeta, SinkWithMeta,
         sinks,
     },
 };
